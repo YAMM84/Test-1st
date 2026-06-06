@@ -5,6 +5,8 @@ from typing import Optional
 class FundamentalAnalysis:
     def __init__(self, info: dict):
         self.info = info
+        currency = info.get("currency", "USD")
+        self._currency_symbol = "¥" if currency in ("JPY", "CNY") else "€" if currency == "EUR" else "$"
 
     def _get(self, key: str, default=None):
         val = self.info.get(key, default)
@@ -158,14 +160,15 @@ class FundamentalAnalysis:
             return "N/A"
         try:
             val = float(val)
+            sym = self._currency_symbol
             if abs(val) >= 1e12:
-                return f"${val/1e12:.2f}T"
+                return f"{sym}{val/1e12:.2f}T"
             elif abs(val) >= 1e9:
-                return f"${val/1e9:.2f}B"
+                return f"{sym}{val/1e9:.2f}B"
             elif abs(val) >= 1e6:
-                return f"${val/1e6:.2f}M"
+                return f"{sym}{val/1e6:.2f}M"
             else:
-                return f"${val:,.0f}"
+                return f"{sym}{val:,.0f}"
         except (TypeError, ValueError):
             return "N/A"
 
