@@ -8,9 +8,16 @@ from rich.columns import Columns
 from rich import box
 from rich.text import Text
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.rule import Rule
 
 from stock_analysis import StockFetcher, TechnicalAnalysis, FundamentalAnalysis, Portfolio, ReportGenerator
 from stock_analysis.demo_data import generate_demo_history, get_demo_info
+from wealth_optimizer import (
+    CompoundGrowthSimulator, STRATEGIES, StrategyAnalyzer, BillionaireRoadmap,
+)
+from wealth_optimizer.allocator import (
+    get_allocation, get_age_based_allocation, recommend_profile, RISK_PROFILES,
+)
 
 console = Console()
 
@@ -556,6 +563,299 @@ def _generate_demo_chart(ticker: str, df, output_dir: str) -> str:
     plt.savefig(filepath, dpi=150, bbox_inches="tight", facecolor="#0d1117")
     plt.close()
     return filepath
+
+
+@cli.group()
+def wealth():
+    """億万長者への最適化戦略ツール"""
+    pass
+
+
+@wealth.command("simulate")
+@click.option("--capital", "-c", default=1_000_000, type=float, help="初期資金 (円)", show_default=True)
+@click.option("--monthly", "-m", default=50_000, type=float, help="毎月積立額 (円)", show_default=True)
+@click.option("--rate", "-r", default=7.0, type=float, help="年間リターン率 (%)", show_default=True)
+@click.option("--years", "-y", default=30, type=int, help="シミュレーション年数", show_default=True)
+@click.option("--target", "-t", default=100_000_000, type=float, help="目標資産額 (円)", show_default=True)
+def wealth_simulate(capital: float, monthly: float, rate: float, years: int, target: float):
+    """複利成長シミュレーション\n\n例: python main.py wealth simulate -c 2000000 -m 100000 -r 7"""
+    sim = CompoundGrowthSimulator(capital, rate / 100, monthly)
+    result = sim.simulate(years=years, target=target)
+
+    target_label = f"{target/1_000_000:.0f}百万円" if target < 1_000_000_000 else f"{target/1_000_000_000:.1f}十億円"
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]初期資金:[/bold white] [cyan]{capital:,.0f}円[/cyan]  "
+        f"[bold white]月次積立:[/bold white] [cyan]{monthly:,.0f}円[/cyan]  "
+        f"[bold white]年率:[/bold white] [cyan]{rate}%[/cyan]  "
+        f"[bold white]目標:[/bold white] [yellow]{target:,.0f}円[/yellow]",
+        title="[bold blue]複利成長シミュレーター[/bold blue]",
+        border_style="blue",
+    ))
+
+    if result.years_to_target:
+        console.print(f"\n  [bold green]目標達成まで約 {result.years_to_target} 年![/bold green]\n")
+    else:
+        needed = sim.required_monthly_contribution(target, years)
+        console.print(
+            f"\n  [yellow]{years}年以内に目標未達。達成に必要な月積立:[/yellow] "
+            f"[bold]{needed:,.0f}円/月[/bold]\n"
+        )
+
+    table = Table(title="年別資産推移", box=box.ROUNDED, title_style="bold yellow", border_style="yellow")
+    table.add_column("年", justify="right", style="dim")
+    table.add_column("資産残高", justify="right")
+    table.add_column("累計投資額", justify="right", style="dim")
+    table.add_column("運用益", justify="right")
+    table.add_column("達成率", justify="right")
+
+    for yr, val in result.year_by_year:
+        contributed = capital + monthly * yr * 12
+        growth = val - contributed
+        rate_pct = val / target * 100
+        color = "green" if val >= target else "cyan" if val >= target * 0.5 else "white"
+        reached = " [bold green]★達成![/bold green]" if val >= target else ""
+        table.add_row(
+            f"{yr}年",
+            f"[{color}]{val:,.0f}円[/{color}]{reached}",
+            f"{contributed:,.0f}円",
+            f"[green]+{growth:,.0f}円[/green]" if growth >= 0 else f"[red]{growth:,.0f}円[/red]",
+            f"{rate_pct:.1f}%",
+        )
+
+    console.print(table)
+
+    console.print(
+        f"\n  [bold]最終資産:[/bold] [bold cyan]{result.final_value:,.0f}円[/bold cyan]  "
+        f"[bold]累計投資:[/bold] {result.total_contributed:,.0f}円  "
+        f"[bold]運用益:[/bold] [green]+{result.total_growth:,.0f}円[/green]  "
+        f"[bold]倍率:[/bold] [yellow]{result.final_value/capital:.1f}倍[/yellow]"
+    )
+
+
+@wealth.command("strategies")
+def wealth_strategies():
+    """富の構築戦略を比較する\n\n例: python main.py wealth strategies"""
+    analyzer = StrategyAnalyzer()
+    ranked = analyzer.rank_by_sharpe()
+
+    console.print()
+    console.print(Panel(
+        "各戦略の期待リターン・リスク・手間・必要資金を総合評価",
+        title="[bold blue]富の構築戦略比較[/bold blue]",
+        border_style="blue",
+    ))
+
+    table = Table(box=box.ROUNDED, title_style="bold yellow", border_style="yellow")
+    table.add_column("戦略", style="bold", width=22)
+    table.add_column("期待年率", justify="right")
+    table.add_column("リスク", justify="right")
+    table.add_column("シャープ比", justify="right")
+    table.add_column("必要資金", justify="right", style="dim")
+    table.add_column("月次工数", justify="right", style="dim")
+    table.add_column("総合スコア", justify="center")
+
+    return_colors = {True: "bright_green", False: "red"}
+    for s in ranked:
+        sharpe = analyzer.get_sharpe(s)
+        score = analyzer.get_score(s)
+        score_color = "bright_green" if score >= 7 else "green" if score >= 5 else "yellow"
+        table.add_row(
+            s.name_jp,
+            f"[{'bright_green' if s.annual_return >= 0.10 else 'green' if s.annual_return >= 0.07 else 'yellow'}]{s.annual_return*100:.0f}%[/]",
+            f"[{'red' if s.volatility >= 0.40 else 'yellow' if s.volatility >= 0.20 else 'green'}]{s.volatility*100:.0f}%[/]",
+            f"{sharpe:.2f}",
+            f"{s.required_capital:,.0f}円〜",
+            f"{s.monthly_effort}h/月",
+            f"[{score_color}]{score}/10[/{score_color}]",
+        )
+
+    console.print(table)
+    console.print("\n[dim]シャープ比 = (期待リターン - 無リスク金利) / リスク（高いほど効率が良い）[/dim]\n")
+
+    console.print(Rule("[bold yellow]推奨戦略の詳細[/bold yellow]"))
+    best = ranked[0]
+    console.print(Panel(
+        f"[bold]{best.description}[/bold]\n\n"
+        f"[bold green]メリット:[/bold green]\n" +
+        "\n".join(f"  ✓ {p}" for p in best.pros) +
+        f"\n\n[bold red]デメリット:[/bold red]\n" +
+        "\n".join(f"  ✗ {c}" for c in best.cons) +
+        f"\n\n[bold cyan]アクションステップ:[/bold cyan]\n" +
+        "\n".join(f"  {i+1}. {a}" for i, a in enumerate(best.action_steps)),
+        title=f"[bold]シャープ比最優秀: {best.name_jp}[/bold]",
+        border_style="green",
+    ))
+
+
+@wealth.command("allocate")
+@click.option("--age", "-a", default=30, type=int, help="年齢", show_default=True)
+@click.option("--risk", "-r", default="medium", type=click.Choice(["low", "medium", "high"]), help="リスク許容度")
+@click.option("--debt/--no-debt", default=False, help="高利息負債の有無")
+@click.option("--capital", "-c", default=3_000_000, type=float, help="運用資金 (円)", show_default=True)
+def wealth_allocate(age: int, risk: str, debt: bool, capital: float):
+    """最適な資産配分を提案する\n\n例: python main.py wealth allocate --age 35 --risk high -c 5000000"""
+    profile = recommend_profile(age, risk, debt)
+    alloc = get_allocation(profile)
+    profile_data = RISK_PROFILES[profile]
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]年齢:[/bold white] [cyan]{age}歳[/cyan]  "
+        f"[bold white]リスク許容度:[/bold white] [cyan]{risk}[/cyan]  "
+        f"[bold white]運用資金:[/bold white] [cyan]{capital:,.0f}円[/cyan]  "
+        f"{'[bold red]高利息負債あり[/bold red]' if debt else '[green]負債なし[/green]'}",
+        title="[bold blue]最適資産配分レコメンデーション[/bold blue]",
+        border_style="blue",
+    ))
+
+    name_jp = profile_data["name_jp"]
+    lc = profile_data["label_color"]
+    console.print(f"\n  推奨プロファイル: [bold {lc}]{name_jp}[/bold {lc}]  "
+                  f"期待年率 [cyan]{alloc.expected_return*100:.0f}%[/cyan]  "
+                  f"想定ボラ [yellow]{alloc.expected_volatility*100:.0f}%[/yellow]\n")
+
+    table = Table(title="推奨アセット配分", box=box.ROUNDED, title_style="bold yellow", border_style="yellow")
+    table.add_column("アセットクラス", style="bold")
+    table.add_column("配分比率", justify="right")
+    table.add_column("投資額 (円)", justify="right")
+    table.add_column("年間期待リターン", justify="right")
+
+    for asset, pct in alloc.allocations.items():
+        amount = capital * pct / 100
+        yr_return = amount * alloc.expected_return * (pct / 100) * (100 / sum(alloc.allocations.values()))
+        pct_color = "bright_green" if pct >= 30 else "green" if pct >= 15 else "dim"
+        table.add_row(
+            asset,
+            f"[{pct_color}]{pct:.0f}%[/{pct_color}]",
+            f"{amount:,.0f}円",
+            f"+{amount * alloc.expected_return * pct / sum(alloc.allocations.values()) / 100:,.0f}円",
+        )
+
+    console.print(table)
+
+    console.print()
+    console.print(Panel(
+        "\n".join(f"  • {note}" for note in alloc.notes),
+        title="[bold]運用ガイドライン[/bold]",
+        border_style="cyan",
+    ))
+
+    sim = CompoundGrowthSimulator(capital, alloc.expected_return, 0)
+    result_10 = sim.simulate(years=10)
+    result_20 = sim.simulate(years=20)
+    result_30 = sim.simulate(years=30)
+    console.print(
+        f"\n  [bold]この配分での成長予測:[/bold]  "
+        f"10年後 [cyan]{result_10.final_value:,.0f}円[/cyan]  "
+        f"20年後 [cyan]{result_20.final_value:,.0f}円[/cyan]  "
+        f"30年後 [cyan]{result_30.final_value:,.0f}円[/cyan]"
+    )
+
+
+@wealth.command("plan")
+@click.option("--capital", "-c", default=0, type=float, help="現在の総資産 (円)", show_default=True)
+@click.option("--monthly", "-m", default=50_000, type=float, help="毎月の積立可能額 (円)", show_default=True)
+@click.option("--age", "-a", default=30, type=int, help="現在の年齢", show_default=True)
+@click.option("--rate", "-r", default=7.0, type=float, help="想定年率リターン (%)", show_default=True)
+def wealth_plan(capital: float, monthly: float, age: int, rate: float):
+    """億万長者ロードマップを表示する\n\n例: python main.py wealth plan --capital 2000000 --monthly 80000 --age 28"""
+    roadmap = BillionaireRoadmap(capital, monthly, rate / 100)
+    milestones = roadmap.get_milestones()
+    stats = roadmap.get_motivational_stats()
+    years_to_1oku = roadmap.years_to_100m()
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]現在資産:[/bold white] [cyan]{capital:,.0f}円[/cyan]  "
+        f"[bold white]月積立:[/bold white] [cyan]{monthly:,.0f}円[/cyan]  "
+        f"[bold white]年齢:[/bold white] [cyan]{age}歳[/cyan]  "
+        f"[bold white]想定年率:[/bold white] [cyan]{rate}%[/cyan]",
+        title="[bold blue]億万長者ロードマップ[/bold blue]",
+        border_style="blue",
+    ))
+
+    if years_to_1oku:
+        reach_age = age + years_to_1oku
+        console.print(
+            f"\n  [bold bright_yellow]1億円達成予測: {years_to_1oku}年後 "
+            f"({reach_age}歳頃)[/bold bright_yellow]\n"
+        )
+    else:
+        console.print(
+            f"\n  [yellow]現在の条件では60年以内に1億円未達。月積立増加か運用改善が必要。[/yellow]\n"
+        )
+
+    for i, milestone in enumerate(milestones):
+        is_completed = capital >= milestone.target_jpy
+        is_next = not is_completed and (i == 0 or capital >= milestones[i - 1].target_jpy)
+
+        if is_completed:
+            status = "[bold green]✓ 達成済み[/bold green]"
+            border = "green"
+        elif is_next:
+            status = "[bold yellow]→ 次の目標[/bold yellow]"
+            border = "yellow"
+        else:
+            status = "[dim]未達成[/dim]"
+            border = "dim"
+
+        progress_pct = min(100, capital / milestone.target_jpy * 100) if milestone.target_jpy > 0 else 0
+        bar_len = 20
+        filled = int(bar_len * progress_pct / 100)
+        bar = f"[green]{'█' * filled}[/green][dim]{'░' * (bar_len - filled)}[/dim] {progress_pct:.0f}%"
+
+        sim = CompoundGrowthSimulator(capital, rate / 100, monthly)
+        m_result = sim.simulate(years=60, target=milestone.target_jpy)
+        eta = f" → 約{m_result.years_to_target}年で到達" if m_result.years_to_target and not is_completed else ""
+
+        actions_text = "\n".join(f"  {j+1}. {a}" for j, a in enumerate(milestone.key_actions))
+        console.print(Panel(
+            f"{status}{eta}\n"
+            f"[dim]フェーズ:[/dim] {milestone.phase}  [dim]目安期間:[/dim] {milestone.years_estimate}\n"
+            f"進捗: {bar}\n\n"
+            f"[bold cyan]主要アクション:[/bold cyan]\n{actions_text}\n\n"
+            f"[bold magenta]マインドセット:[/bold magenta] [italic]{milestone.mindset}[/italic]",
+            title=f"[bold] Step {i+1}: {milestone.name} [{milestone.target_label}][/bold]",
+            border_style=border,
+        ))
+
+    console.print()
+    console.print(Rule("[bold yellow]資産成長シミュレーション[/bold yellow]"))
+
+    sim_table = Table(box=box.ROUNDED, border_style="yellow")
+    sim_table.add_column("時点", style="bold")
+    sim_table.add_column("予測資産", justify="right")
+    sim_table.add_column("年齢", justify="right", style="dim")
+    sim_table.add_column("1億円まで", justify="right")
+
+    checkpoints = [5, 10, 15, 20, 25, 30]
+    for yr in checkpoints:
+        sim = CompoundGrowthSimulator(capital, rate / 100, monthly)
+        r = sim.simulate(years=yr)
+        val = r.final_value
+        val_age = age + yr
+        remaining = max(0, 100_000_000 - val)
+        color = "bright_green" if val >= 100_000_000 else "green" if val >= 50_000_000 else "cyan" if val >= 10_000_000 else "white"
+        sim_table.add_row(
+            f"{yr}年後",
+            f"[{color}]{val:,.0f}円[/{color}]",
+            f"{val_age}歳",
+            f"[green]達成済み[/green]" if val >= 100_000_000 else f"あと{remaining:,.0f}円",
+        )
+
+    console.print(sim_table)
+
+    console.print()
+    console.print(Panel(
+        f"  [bold]今すぐできる3つのアクション:[/bold]\n\n"
+        f"  1. [cyan]証券口座を開設してNISAを設定[/cyan] → eMAXIS Slim全世界株式の積立を今日スタート\n"
+        f"  2. [cyan]固定費を月2万円削減[/cyan] → その分を全額投資に回す\n"
+        f"  3. [cyan]副業で月5万円の収入を目指す[/cyan] → スキルを棚卸しして最初の案件を取る",
+        title="[bold bright_yellow]今日から始める行動計画[/bold bright_yellow]",
+        border_style="bright_yellow",
+    ))
 
 
 if __name__ == "__main__":
