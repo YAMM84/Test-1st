@@ -17,6 +17,7 @@ from wealth_optimizer import (
     MonteCarloEngine, EfficientFrontierOptimizer, CANDIDATE_UNIVERSE,
     StockScreener, ExecutionPlanner,
     ALL_STRATEGIES, IncomeSimulator, filter_by_energy, rank_by_energy_efficiency,
+    PHASES, WEEKLY_TASKS, ProgressTracker,
 )
 from wealth_optimizer.allocator import (
     get_allocation, get_age_based_allocation, recommend_profile, RISK_PROFILES,
@@ -1285,6 +1286,166 @@ def wealth_income(current: float, energy: str, years: int):
     console.print(
         f"\n  [dim]※ 低体力モードは能力値を60%で計算。体調が安定すれば上振れの余地があります。[/dim]"
     )
+
+
+@wealth.command("launch")
+def wealth_launch():
+    """全戦略の並行実行フェーズプランを表示する\n\n例: python main.py wealth launch"""
+    phase_colors = ["bright_cyan", "green", "yellow", "magenta"]
+    cat_colors = {"SETUP": "cyan", "LEARN": "blue", "CREATE": "green", "LAUNCH": "bright_green", "GROW": "magenta"}
+
+    console.print()
+    console.print(Panel(
+        "低体力制約内で全戦略を並行実行するための最適フェーズ設計\n"
+        "[dim]フェーズが進むほど前フェーズの収入・経験が次の戦略を後押しする[/dim]",
+        title="[bold blue]全戦略 並行実行ロードマップ[/bold blue]",
+        border_style="blue",
+    ))
+
+    for phase in PHASES:
+        pc = phase_colors[phase.number - 1]
+        milestones_text = "\n".join(f"  □ {m}" for m in phase.milestones)
+        strategies_text = "\n".join(f"  ▶ {s}" for s in phase.strategies)
+        console.print(Panel(
+            f"[bold white]期間:[/bold white] {phase.months}  "
+            f"[bold white]週あたりエネルギー予算:[/bold white] [yellow]{phase.weekly_hours_budget}時間/週[/yellow]\n\n"
+            f"[bold]フォーカス:[/bold] {phase.focus}\n\n"
+            f"[bold {pc}]対象戦略:[/bold {pc}]\n{strategies_text}\n\n"
+            f"[dim]{phase.rationale}[/dim]\n\n"
+            f"[bold cyan]達成マイルストーン:[/bold cyan]\n{milestones_text}",
+            title=f"[bold {pc}] Phase {phase.number}: {phase.name} [/bold {pc}]",
+            border_style=pc,
+        ))
+
+    # 全戦略の週次タスク早見表
+    console.print()
+    console.print(Rule("[bold yellow]最初の4週間 週次タスク一覧 (Phase 1)[/bold yellow]"))
+
+    phase1_strategies = PHASES[0].strategies
+    for strat_name in phase1_strategies:
+        tasks = WEEKLY_TASKS.get(strat_name, [])[:4]
+        if not tasks:
+            continue
+        table = Table(title=strat_name, box=box.SIMPLE, title_style="bold green")
+        table.add_column("週", justify="center", width=4, style="dim")
+        table.add_column("タスク")
+        table.add_column("時間", justify="right", style="dim")
+        table.add_column("種別", justify="center")
+        for t in tasks:
+            cc = cat_colors.get(t.category, "white")
+            table.add_row(f"{t.week}週", t.task, f"{t.hours_needed}h", f"[{cc}]{t.category}[/{cc}]")
+        console.print(table)
+
+    # エネルギー配分サマリー
+    console.print()
+    total_phase1 = sum(t.hours_needed for s in phase1_strategies for t in WEEKLY_TASKS.get(s, [])[:4]) / 4
+    console.print(Panel(
+        f"  Phase 1 の週あたり推定作業時間: [bold cyan]{total_phase1:.1f}時間/週[/bold cyan]\n"
+        f"  1日換算: [bold cyan]{total_phase1/7:.1f}時間/日[/bold cyan]\n\n"
+        f"  [yellow]体力がない日はタスクをスキップしてOK。週の合計時間を守ることより「続けること」が優先。[/yellow]\n"
+        f"  [dim]体調の良い日に2〜3タスクまとめてこなし、悪い日は完全休息する戦略が低体力には最適。[/dim]",
+        title="[bold]週次エネルギー配分ガイド[/bold]",
+        border_style="yellow",
+    ))
+
+
+@wealth.command("status")
+def wealth_status():
+    """全戦略の進捗ダッシュボードを表示する\n\n例: python main.py wealth status"""
+    tracker = ProgressTracker()
+    data = tracker.get_status()
+    strategies = data.get("strategies", {})
+    logs = data.get("logs", [])
+
+    console.print()
+    console.print(Panel(
+        f"追跡中の戦略: [cyan]{len(strategies)}件[/cyan]  "
+        f"アクション記録: [cyan]{len(logs)}件[/cyan]  "
+        f"副業収入合計: [bold green]{tracker.total_monthly_income():,.0f}円[/bold green]",
+        title="[bold blue]進捗ダッシュボード[/bold blue]",
+        border_style="blue",
+    ))
+
+    if not strategies:
+        console.print(
+            "\n  [yellow]まだ戦略が登録されていません。[/yellow]\n\n"
+            "  まず以下コマンドで戦略を開始してください:\n"
+            "  [cyan]python main.py wealth log --strategy 'AIコンテンツ代行' --action '今日やったこと'[/cyan]"
+        )
+        return
+
+    for name, info in strategies.items():
+        week = info.get("current_week", 1)
+        income = info.get("monthly_income", 0)
+        completed = info.get("completed_tasks", [])
+        next_tasks = tracker.get_next_tasks(name)
+
+        completed_text = "\n".join(f"  [green]✓[/green] {t}" for t in completed[-3:]) if completed else "  [dim]まだなし[/dim]"
+        next_text = "\n".join(f"  [cyan]→[/cyan] {t.task} [dim]({t.hours_needed}h)[/dim]" for t in next_tasks[:3])
+
+        console.print(Panel(
+            f"[bold white]現在週:[/bold white] {week}週目  "
+            f"[bold white]副業収入:[/bold white] [green]{income:,.0f}円[/green]\n\n"
+            f"[bold]最近の完了タスク:[/bold]\n{completed_text}\n\n"
+            f"[bold cyan]次のタスク:[/bold cyan]\n{next_text or '  [dim]全タスク完了[/dim]'}",
+            title=f"[bold green]{name}[/bold green]",
+            border_style="green",
+        ))
+
+    # 最近のログ
+    if logs:
+        console.print()
+        log_table = Table(title="最近のアクションログ", box=box.SIMPLE, title_style="bold dim")
+        log_table.add_column("日付", style="dim", width=12)
+        log_table.add_column("戦略", style="bold", width=18)
+        log_table.add_column("アクション")
+        log_table.add_column("収入", justify="right", style="green")
+        for entry in logs[-8:]:
+            income_str = f"+{entry['income_gained']:,.0f}円" if entry.get("income_gained", 0) > 0 else "-"
+            log_table.add_row(entry["date"], entry["strategy"][:16], entry["action"][:40], income_str)
+        console.print(log_table)
+
+
+@wealth.command("log")
+@click.option("--strategy", "-s", required=True, help="戦略名 (例: 'AIコンテンツ代行')")
+@click.option("--action", "-a", required=True, help="実行したアクション")
+@click.option("--income", "-i", default=0.0, type=float, help="今日得た収入 (円)")
+def wealth_log(strategy: str, action: str, income: float):
+    """アクションを記録して進捗を蓄積する\n\n例: python main.py wealth log -s 'AIコンテンツ代行' -a 'クラウドワークスに登録した' -i 0"""
+    tracker = ProgressTracker()
+
+    # 戦略が未登録なら自動登録
+    if strategy not in tracker.get_status().get("strategies", {}):
+        # フェーズを特定
+        phase_num = 1
+        for ph in PHASES:
+            if strategy in ph.strategies:
+                phase_num = ph.number
+                break
+        tracker.start_strategy(strategy, phase_num)
+        console.print(f"  [cyan]新しく戦略を開始しました:[/cyan] {strategy}")
+
+    tracker.log_action(strategy, action, income)
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]戦略:[/bold white] [cyan]{strategy}[/cyan]\n"
+        f"[bold white]アクション:[/bold white] {action}\n"
+        + (f"[bold white]収入:[/bold white] [bold green]+{income:,.0f}円[/bold green]" if income > 0 else ""),
+        title="[bold green]アクションを記録しました[/bold green]",
+        border_style="green",
+    ))
+
+    # 次のタスクを表示
+    next_tasks = tracker.get_next_tasks(strategy)
+    if next_tasks:
+        console.print("  [bold cyan]次にやること:[/bold cyan]")
+        for t in next_tasks[:3]:
+            console.print(f"  → {t.task}  [dim]({t.hours_needed}h)[/dim]")
+
+    total = tracker.total_monthly_income()
+    if total > 0:
+        console.print(f"\n  [bold]累計副業収入:[/bold] [bright_green]{total:,.0f}円[/bright_green]")
 
 
 @wealth.command("fullplan")
