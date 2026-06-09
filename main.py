@@ -16,6 +16,7 @@ from wealth_optimizer import (
     CompoundGrowthSimulator, STRATEGIES, StrategyAnalyzer, BillionaireRoadmap,
     MonteCarloEngine, EfficientFrontierOptimizer, CANDIDATE_UNIVERSE,
     StockScreener, ExecutionPlanner,
+    ALL_STRATEGIES, IncomeSimulator, filter_by_energy, rank_by_energy_efficiency,
 )
 from wealth_optimizer.allocator import (
     get_allocation, get_age_based_allocation, recommend_profile, RISK_PROFILES,
@@ -1153,6 +1154,263 @@ def wealth_execute(capital: float, monthly: float, age: int, months: int,
         f"  [bold]1億円達成予測:[/bold] "
         + (f"[bright_green]約{result.years_to_target}年後[/bright_green]" if result.years_to_target else "[yellow]60年超（月積立増加を検討）[/yellow]"),
         title="[bold]実行計画サマリー[/bold]",
+        border_style="bright_yellow",
+    ))
+
+
+@wealth.command("income")
+@click.option("--current", "-c", default=300_000, type=float, help="現在の月収 (円)", show_default=True)
+@click.option("--energy", "-e", default="low", type=click.Choice(["low", "medium", "high"]), help="体力レベル")
+@click.option("--years", "-y", default=10, type=int, help="予測年数", show_default=True)
+def wealth_income(current: float, energy: str, years: int):
+    """体力制約を考慮した収入増加戦略を提案する\n\n例: python main.py wealth income --current 300000 --energy low"""
+    max_physical = {"low": 1, "medium": 2, "high": 5}[energy]
+    max_stress = {"low": 2, "medium": 3, "high": 5}[energy]
+    energy_label = {"low": "低体力 (体力消費を最小化)", "medium": "中程度", "high": "高体力"}[energy]
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]現在の月収:[/bold white] [cyan]{current:,.0f}円[/cyan]  "
+        f"[bold white]体力レベル:[/bold white] [yellow]{energy_label}[/yellow]",
+        title="[bold blue]第1層: 収入最適化 — 体力制約考慮版[/bold blue]",
+        border_style="blue",
+    ))
+
+    if energy == "low":
+        console.print(Panel(
+            "  [bold yellow]低体力前提の設計原則:[/bold yellow]\n\n"
+            "  [green]優先する条件:[/green]\n"
+            "  ✓ 完全リモート・在宅のみ\n"
+            "  ✓ 非同期作業（締め切りを自分で設定できる）\n"
+            "  ✓ 体調の波に合わせて仕事量を増減できる\n"
+            "  ✓ 一度作ったら繰り返し収入になる（ストック型）\n"
+            "  ✓ AIツールで作業量そのものを削減できる\n\n"
+            "  [red]除外する条件:[/red]\n"
+            "  ✗ 外出・通勤が必要な仕事\n"
+            "  ✗ 顧客対応・電話対応（体調悪い日に対応困難）\n"
+            "  ✗ 締め切りがタイトなリアルタイム業務\n"
+            "  ✗ 長時間連続の集中が必要な仕事",
+            title="[bold]低体力最適化の基本方針[/bold]",
+            border_style="yellow",
+        ))
+
+    filtered = filter_by_energy(ALL_STRATEGIES, max_physical, max_stress)
+    ranked = rank_by_energy_efficiency(filtered)
+
+    cat_colors = {"CAREER": "blue", "SIDE_HUSTLE": "green", "PRODUCT": "magenta"}
+    cat_labels = {"CAREER": "本業強化", "SIDE_HUSTLE": "副業", "PRODUCT": "プロダクト"}
+
+    table = Table(
+        title=f"体力制約内の収入戦略ランキング ({len(ranked)}件)",
+        box=box.ROUNDED, title_style="bold yellow", border_style="yellow",
+    )
+    table.add_column("順位", justify="center", width=4)
+    table.add_column("戦略名", style="bold", width=24)
+    table.add_column("種別", justify="center", width=10)
+    table.add_column("体力", justify="center")
+    table.add_column("ストレス", justify="center")
+    table.add_column("時間自由度", justify="center")
+    table.add_column("月収ポテンシャル", justify="right")
+    table.add_column("収益化まで", justify="right")
+    table.add_column("スケール", justify="center")
+    table.add_column("リモート", justify="center")
+
+    energy_bar = {1: "[green]●○○○○[/green]", 2: "[yellow]●●○○○[/yellow]",
+                  3: "[yellow]●●●○○[/yellow]", 4: "[red]●●●●○[/red]", 5: "[red]●●●●●[/red]"}
+    scale_bar = {1: "▪", 2: "▪▪", 3: "▪▪▪", 4: "▪▪▪▪", 5: "[bright_green]▪▪▪▪▪[/bright_green]"}
+
+    for rank, s in enumerate(ranked, 1):
+        cc = cat_colors.get(s.category, "white")
+        table.add_row(
+            f"{rank}",
+            s.name,
+            f"[{cc}]{cat_labels.get(s.category, s.category)}[/{cc}]",
+            energy_bar.get(s.physical_energy, ""),
+            energy_bar.get(s.mental_stress, ""),
+            energy_bar.get(s.time_flexibility, "").replace("●", "★"),
+            f"[green]+{s.income_potential_monthly:,.0f}円/月[/green]",
+            f"{s.startup_months}ヶ月",
+            scale_bar.get(s.scalability, ""),
+            "[green]可[/green]" if s.remote_possible else "[red]不可[/red]",
+        )
+
+    console.print()
+    console.print(table)
+
+    # Top 3 detailed breakdown
+    console.print()
+    console.print(Rule("[bold yellow]体力制約内 TOP3 詳細[/bold yellow]"))
+    for i, s in enumerate(ranked[:3], 1):
+        cc = cat_colors.get(s.category, "white")
+        steps_text = "\n".join(f"  {j+1}. {step}" for j, step in enumerate(s.how_to_start))
+        tools_text = "  " + " / ".join(s.tools_needed)
+        console.print(Panel(
+            f"[dim]{s.description}[/dim]\n\n"
+            f"[bold cyan]始め方:[/bold cyan]\n{steps_text}\n\n"
+            f"[bold dim]必要ツール:[/bold dim]\n{tools_text}\n\n"
+            f"[bold yellow]体力がない人への注意点:[/bold yellow]\n  {s.energy_note}",
+            title=f"[bold {cc}]#{i} {s.name}  +{s.income_potential_monthly:,.0f}円/月ポテンシャル[/bold {cc}]",
+            border_style=cc,
+        ))
+
+    # Income projection
+    console.print()
+    console.print(Rule("[bold yellow]収入成長シミュレーション[/bold yellow]"))
+    sim = IncomeSimulator(current, has_low_energy=(energy == "low"))
+    projection = sim.project(ranked[:3], years=years)
+
+    proj_table = Table(box=box.ROUNDED, border_style="cyan")
+    proj_table.add_column("時点", style="bold")
+    proj_table.add_column("予測月収", justify="right")
+    proj_table.add_column("年収換算", justify="right")
+    proj_table.add_column("現在比", justify="right")
+    proj_table.add_column("月次投資余力(推定)", justify="right", style="dim")
+
+    checkpoints = [1, 2, 3, 5, 7, 10]
+    for yr in checkpoints:
+        if yr <= years:
+            val = projection.year_by_year[yr]
+            ratio = val / current
+            invest_capacity = val * 0.25  # 手取りの25%を投資余力と仮定
+            r_color = "bright_green" if ratio >= 2.0 else "green" if ratio >= 1.5 else "cyan"
+            proj_table.add_row(
+                f"{yr}年後",
+                f"[{r_color}]{val:,.0f}円[/{r_color}]",
+                f"{val*12:,.0f}円",
+                f"[{r_color}]{ratio:.1f}倍[/{r_color}]",
+                f"{invest_capacity:,.0f}円",
+            )
+
+    console.print(proj_table)
+    console.print(
+        f"\n  [dim]※ 低体力モードは能力値を60%で計算。体調が安定すれば上振れの余地があります。[/dim]"
+    )
+
+
+@wealth.command("fullplan")
+@click.option("--assets", "-a", default=1_000_000, type=float, help="現在の総資産 (円)")
+@click.option("--income", "-i", default=300_000, type=float, help="現在の月収 (円)")
+@click.option("--age", default=30, type=int, help="年齢")
+@click.option("--energy", "-e", default="low", type=click.Choice(["low", "medium", "high"]))
+@click.option("--years", "-y", default=20, type=int, help="シミュレーション年数", show_default=True)
+def wealth_fullplan(assets: float, income: float, age: int, energy: str, years: int):
+    """収入増加(第1層)と資産運用(第3層)を統合した完全プランを表示する\n\n例: python main.py wealth fullplan --assets 1000000 --income 300000 --age 30 --energy low"""
+    max_physical = {"low": 1, "medium": 2, "high": 5}[energy]
+    max_stress = {"low": 2, "medium": 3, "high": 5}[energy]
+    energy_jp = {"low": "低体力", "medium": "中程度", "high": "高体力"}[energy]
+
+    console.print()
+    console.print(Panel(
+        f"[bold white]総資産:[/bold white] [cyan]{assets:,.0f}円[/cyan]  "
+        f"[bold white]月収:[/bold white] [cyan]{income:,.0f}円[/cyan]  "
+        f"[bold white]年齢:[/bold white] [cyan]{age}歳[/cyan]  "
+        f"[bold white]体力:[/bold white] [yellow]{energy_jp}[/yellow]",
+        title="[bold blue]億万長者 統合プラン (第1層+第3層)[/bold blue]",
+        border_style="blue",
+    ))
+
+    # 収入シミュレーション
+    filtered = filter_by_energy(ALL_STRATEGIES, max_physical, max_stress)
+    ranked_income = rank_by_energy_efficiency(filtered)[:3]
+    income_sim = IncomeSimulator(income, has_low_energy=(energy == "low"))
+    income_proj = income_sim.project(ranked_income, years=years)
+
+    # 資産シミュレーション: 収入増加分を投資に回す統合モデル
+    INVEST_RATIO = 0.25  # 月収増加分の25%を追加投資
+    BASE_INVEST_RATIO = 0.20  # 現在の月収の20%を基礎投資
+    ANNUAL_RETURN = 0.07
+
+    r = ANNUAL_RETURN / 12
+    asset_value = assets
+    integrated_path = [(0, assets, income)]  # (year, assets, monthly_income)
+
+    for yr in range(1, years + 1):
+        monthly_income_this_year = income_proj.year_by_year[yr]
+        base_invest = income * BASE_INVEST_RATIO
+        extra_invest = (monthly_income_this_year - income) * INVEST_RATIO
+        total_monthly_invest = base_invest + max(0, extra_invest)
+
+        for _ in range(12):
+            asset_value = asset_value * (1 + r) + total_monthly_invest
+        integrated_path.append((yr, asset_value, monthly_income_this_year))
+
+    # 運用のみシナリオ（比較用）
+    invest_only_value = assets
+    invest_only_monthly = income * BASE_INVEST_RATIO
+    invest_only_path = [(0, assets)]
+    for yr in range(1, years + 1):
+        for _ in range(12):
+            invest_only_value = invest_only_value * (1 + r) + invest_only_monthly
+        invest_only_path.append((yr, invest_only_value))
+
+    # 統合比較テーブル
+    table = Table(
+        title="統合シミュレーション: 収入最大化 × 資産運用",
+        box=box.ROUNDED, title_style="bold yellow", border_style="yellow",
+    )
+    table.add_column("年", justify="right", style="dim")
+    table.add_column("月収(予測)", justify="right")
+    table.add_column("月投資額", justify="right", style="dim")
+    table.add_column("統合後の資産", justify="right")
+    table.add_column("運用のみの資産", justify="right", style="dim")
+    table.add_column("上乗せ効果", justify="right")
+    table.add_column("1億円まで", justify="right")
+
+    checkpoints = [1, 3, 5, 7, 10, 15, 20]
+    for yr in checkpoints:
+        if yr <= years:
+            _, integrated_assets, monthly_inc = integrated_path[yr]
+            _, invest_only_assets = invest_only_path[yr]
+            extra = integrated_assets - invest_only_assets
+            remaining = max(0, 100_000_000 - integrated_assets)
+            base_invest = income * BASE_INVEST_RATIO
+            extra_invest_m = (monthly_inc - income) * INVEST_RATIO
+            total_m = base_invest + max(0, extra_invest_m)
+
+            a_color = "bright_green" if integrated_assets >= 100_000_000 else "green" if integrated_assets >= 50_000_000 else "cyan"
+            reached = " [bold green]★達成![/bold green]" if integrated_assets >= 100_000_000 else ""
+            table.add_row(
+                f"{yr}年後",
+                f"[green]{monthly_inc:,.0f}円[/green]",
+                f"{total_m:,.0f}円",
+                f"[{a_color}]{integrated_assets:,.0f}円[/{a_color}]{reached}",
+                f"{invest_only_assets:,.0f}円",
+                f"[bright_cyan]+{extra:,.0f}円[/bright_cyan]",
+                f"[green]達成済み[/green]" if integrated_assets >= 100_000_000 else f"{remaining:,.0f}円",
+            )
+
+    console.print()
+    console.print(table)
+
+    # 1億円達成年を特定
+    integrated_year = next((yr for yr, val, _ in integrated_path if val >= 100_000_000), None)
+    invest_only_year = next((yr for yr, val in invest_only_path if val >= 100_000_000), None)
+    speedup = (invest_only_year - integrated_year) if (integrated_year and invest_only_year) else None
+
+    console.print()
+    if integrated_year:
+        console.print(Panel(
+            f"  [bold bright_yellow]統合プランでの1億円達成: {integrated_year}年後 ({age+integrated_year}歳)[/bold bright_yellow]\n"
+            + (f"  [bold green]収入増加戦略により約{speedup}年短縮[/bold green]" if speedup and speedup > 0 else ""),
+            title="[bold]達成予測[/bold]",
+            border_style="bright_yellow",
+        ))
+
+    # 今月から実行すべき具体的アクション
+    console.print()
+    console.print(Panel(
+        f"  [bold cyan]今月のアクション TOP3 (体力: {energy_jp})[/bold cyan]\n\n"
+        + "\n\n".join(
+            (
+                f"  [bold][{'green' if i==0 else 'yellow' if i==1 else 'cyan'}]"
+                f"{'★最優先' if i==0 else '◎次点' if i==1 else '○推奨'} {s.name}"
+                f"[/{'green' if i==0 else 'yellow' if i==1 else 'cyan'}][/bold]\n"
+                f"  → {s.how_to_start[0]}\n"
+                f"  [dim]期待収入: +{s.income_potential_monthly:,.0f}円/月  収益化まで: {s.startup_months}ヶ月[/dim]"
+            )
+            for i, s in enumerate(ranked_income)
+        ),
+        title="[bold bright_yellow]今すぐ動く: 優先アクションリスト[/bold bright_yellow]",
         border_style="bright_yellow",
     ))
 
