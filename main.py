@@ -14,6 +14,8 @@ from stock_analysis import StockFetcher, TechnicalAnalysis, FundamentalAnalysis,
 from stock_analysis.demo_data import generate_demo_history, get_demo_info
 from wealth_optimizer import (
     CompoundGrowthSimulator, STRATEGIES, StrategyAnalyzer, BillionaireRoadmap,
+    MonteCarloEngine, EfficientFrontierOptimizer, CANDIDATE_UNIVERSE,
+    StockScreener, ExecutionPlanner,
 )
 from wealth_optimizer.allocator import (
     get_allocation, get_age_based_allocation, recommend_profile, RISK_PROFILES,
@@ -854,6 +856,303 @@ def wealth_plan(capital: float, monthly: float, age: int, rate: float):
         f"  2. [cyan]固定費を月2万円削減[/cyan] → その分を全額投資に回す\n"
         f"  3. [cyan]副業で月5万円の収入を目指す[/cyan] → スキルを棚卸しして最初の案件を取る",
         title="[bold bright_yellow]今日から始める行動計画[/bold bright_yellow]",
+        border_style="bright_yellow",
+    ))
+
+
+@wealth.command("optimize")
+@click.option("--capital", "-c", default=1_000_000, type=float, help="初期資金 (円)")
+@click.option("--monthly", "-m", default=50_000, type=float, help="毎月積立額 (円)")
+@click.option("--years", "-y", default=25, type=int, help="運用年数")
+@click.option("--target", "-t", default=100_000_000, type=float, help="目標資産額 (円)")
+@click.option("--sims", default=10000, type=int, help="モンテカルロ試行回数", show_default=True)
+def wealth_optimize(capital: float, monthly: float, years: int, target: float, sims: int):
+    """全戦略をモンテカルロ最適化して最も成功確率が高い手法を特定する\n\n例: python main.py wealth optimize -c 2000000 -m 80000 -y 25"""
+    console.print()
+    console.print(Panel(
+        f"[bold white]初期資金:[/bold white] [cyan]{capital:,.0f}円[/cyan]  "
+        f"[bold white]月積立:[/bold white] [cyan]{monthly:,.0f}円[/cyan]  "
+        f"[bold white]目標:[/bold white] [yellow]{target:,.0f}円[/yellow]  "
+        f"[bold white]期間:[/bold white] [cyan]{years}年[/cyan]  "
+        f"[bold white]試行回数:[/bold white] [dim]{sims:,}回[/dim]",
+        title="[bold blue]モンテカルロ最適化 — 全戦略確率解析[/bold blue]",
+        border_style="blue",
+    ))
+
+    engine = MonteCarloEngine(n_simulations=sims)
+    ranked = []
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as prog:
+        task_id = prog.add_task("[cyan]全戦略をシミュレーション中...", total=None)
+        for i, s in enumerate(STRATEGIES):
+            prog.update(task_id, description=f"[cyan]シミュレーション中: {s.name_jp} ({i+1}/{len(STRATEGIES)})")
+            r = engine.simulate(s, capital, monthly, years, target)
+            ranked.append((s, r))
+        ranked.sort(key=lambda x: (x[1].success_rate, x[1].median_outcome), reverse=True)
+
+    table = Table(title=f"全戦略 成功確率ランキング ({sims:,}回試行)", box=box.ROUNDED,
+                  title_style="bold yellow", border_style="yellow")
+    table.add_column("順位", justify="center", width=4)
+    table.add_column("戦略", style="bold", width=22)
+    table.add_column("成功確率", justify="right")
+    table.add_column("中央値(最終)", justify="right")
+    table.add_column("悲観(10%)", justify="right", style="dim")
+    table.add_column("楽観(90%)", justify="right")
+    table.add_column("中央達成年", justify="right")
+    table.add_column("月80%達成必要額", justify="right", style="dim")
+
+    for rank, (s, r) in enumerate(ranked, 1):
+        sc = r.success_rate
+        sc_color = "bright_green" if sc >= 0.7 else "green" if sc >= 0.4 else "yellow" if sc >= 0.2 else "red"
+        medal = {1: "◎", 2: "○", 3: "△"}.get(rank, " ")
+        yr_label = f"{r.expected_years_median:.1f}年" if r.success_rate > 0.05 else "60年超"
+        table.add_row(
+            f"[{sc_color}]{medal}{rank}[/{sc_color}]",
+            s.name_jp,
+            f"[{sc_color}]{sc*100:.1f}%[/{sc_color}]",
+            f"{r.median_outcome/1_000_000:.1f}百万円",
+            f"{r.p10_outcome/1_000_000:.1f}百万円",
+            f"[green]{r.p90_outcome/1_000_000:.1f}百万円[/green]",
+            yr_label,
+            f"{r.required_monthly_for_80pct:,.0f}円",
+        )
+
+    console.print()
+    console.print(table)
+
+    best_s, best_r = ranked[0]
+    console.print()
+    console.print(Panel(
+        f"[bold]最適戦略:[/bold] [bright_green]{best_s.name_jp}[/bright_green]\n"
+        f"[bold]成功確率:[/bold] [bright_green]{best_r.success_rate*100:.1f}%[/bright_green]  "
+        f"[bold]中央値最終資産:[/bold] [cyan]{best_r.median_outcome:,.0f}円[/cyan]\n"
+        f"[bold]楽観シナリオ(90%):[/bold] [green]{best_r.p90_outcome:,.0f}円[/green]  "
+        f"[bold]悲観シナリオ(10%):[/bold] [red]{best_r.p10_outcome:,.0f}円[/red]\n\n"
+        f"[dim]{best_s.description}[/dim]\n\n"
+        f"[bold cyan]今すぐ実行すべきアクション:[/bold cyan]\n" +
+        "\n".join(f"  {i+1}. {a}" for i, a in enumerate(best_s.action_steps)),
+        title="[bold bright_green]最優秀戦略の詳細[/bold bright_green]",
+        border_style="bright_green",
+    ))
+
+    # Efficient frontier using real data
+    console.print()
+    console.print(Rule("[bold yellow]効率的フロンティア — 数学的最適ポートフォリオ[/bold yellow]"))
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as prog:
+        prog.add_task("[cyan]実市場データで最適ポートフォリオを計算中...", total=None)
+        opt = EfficientFrontierOptimizer(period="3y")
+        ok = opt.fetch_and_prepare()
+        if ok:
+            max_sharpe = opt.maximize_sharpe()
+        else:
+            max_sharpe = None
+
+    if max_sharpe:
+        opt_table = Table(title="シャープ比最大化ポートフォリオ (実データ 3年)", box=box.ROUNDED,
+                          title_style="bold cyan", border_style="cyan")
+        opt_table.add_column("ティッカー", style="bold")
+        opt_table.add_column("銘柄名", style="dim")
+        opt_table.add_column("最適比率", justify="right")
+        opt_table.add_column("投資額", justify="right")
+
+        for tkr, nm, w in sorted(
+            zip(max_sharpe.tickers, max_sharpe.names, max_sharpe.weights),
+            key=lambda x: x[2], reverse=True
+        ):
+            if w >= 0.02:
+                opt_table.add_row(
+                    tkr, nm,
+                    f"[{'bright_green' if w >= 0.15 else 'green'}]{w*100:.1f}%[/]",
+                    f"{capital * w:,.0f}円",
+                )
+
+        console.print(opt_table)
+        console.print(
+            f"\n  [bold]期待年率:[/bold] [cyan]{max_sharpe.expected_annual_return*100:.1f}%[/cyan]  "
+            f"[bold]期待ボラ:[/bold] [yellow]{max_sharpe.expected_volatility*100:.1f}%[/yellow]  "
+            f"[bold]シャープ比:[/bold] [green]{max_sharpe.sharpe_ratio:.2f}[/green]"
+        )
+
+
+@wealth.command("screen")
+@click.option("--top", "-n", default=10, type=int, help="上位N銘柄を表示", show_default=True)
+def wealth_screen(top: int):
+    """実データで投資候補銘柄をスクリーニングする\n\n例: python main.py wealth screen --top 10"""
+    console.print()
+    console.print(Panel(
+        "割安度・成長性・収益性・モメンタムを実データで多角評価",
+        title="[bold blue]リアルタイム銘柄スクリーニング[/bold blue]",
+        border_style="blue",
+    ))
+
+    screener = StockScreener(top_n=top)
+    results = []
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as prog:
+        task_id = prog.add_task("[cyan]銘柄データ取得中...", total=None)
+
+        def cb(ticker, i, total):
+            prog.update(task_id, description=f"[cyan]スクリーニング中: {ticker} ({i}/{total})")
+
+        results = screener.run(progress_callback=cb)
+
+    if not results:
+        console.print("[red]データ取得に失敗しました。ネット接続を確認してください。[/red]")
+        return
+
+    table = Table(title=f"投資候補ランキング TOP{top}", box=box.ROUNDED,
+                  title_style="bold yellow", border_style="yellow")
+    table.add_column("順位", justify="center", width=4)
+    table.add_column("銘柄", style="bold")
+    table.add_column("名称", style="dim", width=20)
+    table.add_column("スコア", justify="center")
+    table.add_column("現在値", justify="right")
+    table.add_column("PER", justify="right")
+    table.add_column("PBR", justify="right")
+    table.add_column("ROE", justify="right")
+    table.add_column("配当%", justify="right")
+    table.add_column("1Y騰落", justify="right")
+    table.add_column("テクニカル", justify="center")
+
+    for rank, s in enumerate(results, 1):
+        sc_color = "bright_green" if s.score >= 75 else "green" if s.score >= 60 else "yellow" if s.score >= 45 else "red"
+        mom_color = "green" if (s.momentum_1y or 0) >= 0 else "red"
+        tech_color = {"強い上昇": "bright_green", "上昇": "green", "中立": "yellow",
+                      "下降": "red", "強い下降": "bright_red"}.get(s.technical_signal, "white")
+        table.add_row(
+            f"{rank}",
+            s.ticker,
+            s.name[:18],
+            f"[{sc_color}]{s.score}[/{sc_color}]",
+            f"{s.current_price:,.2f}{s.currency}",
+            f"{s.pe_ratio}" if s.pe_ratio else "[dim]N/A[/dim]",
+            f"{s.pb_ratio}" if s.pb_ratio else "[dim]N/A[/dim]",
+            f"{s.roe}%" if s.roe else "[dim]N/A[/dim]",
+            f"{s.dividend_yield}%" if s.dividend_yield else "[dim]-[/dim]",
+            f"[{mom_color}]{'+' if (s.momentum_1y or 0) >= 0 else ''}{s.momentum_1y}%[/{mom_color}]" if s.momentum_1y is not None else "[dim]N/A[/dim]",
+            f"[{tech_color}]{s.technical_signal}[/{tech_color}]",
+        )
+
+    console.print(table)
+
+    if results:
+        top3 = results[:3]
+        console.print()
+        for s in top3:
+            if s.buy_reasons or s.risk_flags:
+                reasons_text = "\n".join(f"  [green]✓[/green] {r}" for r in s.buy_reasons)
+                flags_text = "\n".join(f"  [red]⚠[/red] {f}" for f in s.risk_flags)
+                console.print(Panel(
+                    (reasons_text + ("\n" + flags_text if flags_text else "")),
+                    title=f"[bold]{s.ticker} {s.name} (スコア:{s.score})[/bold]",
+                    border_style="green" if not s.risk_flags else "yellow",
+                ))
+
+
+@wealth.command("execute")
+@click.option("--capital", "-c", default=1_000_000, type=float, help="現在の総資産 (円)")
+@click.option("--monthly", "-m", default=50_000, type=float, help="毎月の投資予算 (円)")
+@click.option("--age", "-a", default=30, type=int, help="年齢")
+@click.option("--months", default=12, type=int, help="実行計画の月数", show_default=True)
+@click.option("--nisa/--no-nisa", default=False, help="NISA口座開設済み")
+@click.option("--ideco/--no-ideco", default=False, help="iDeCo口座開設済み")
+@click.option("--self-employed/--employee", default=False, help="自営業かどうか")
+@click.option("--with-screen/--no-screen", default=False, help="銘柄スクリーニングを実行して組み込む")
+def wealth_execute(capital: float, monthly: float, age: int, months: int,
+                   nisa: bool, ideco: bool, self_employed: bool, with_screen: bool):
+    """億万長者への具体的実行カレンダーを生成する\n\n例: python main.py wealth execute -c 2000000 -m 100000 --age 30 --with-screen"""
+    console.print()
+    console.print(Panel(
+        f"[bold white]資産:[/bold white] [cyan]{capital:,.0f}円[/cyan]  "
+        f"[bold white]月投資額:[/bold white] [cyan]{monthly:,.0f}円[/cyan]  "
+        f"[bold white]年齢:[/bold white] [cyan]{age}歳[/cyan]  "
+        f"[bold white]期間:[/bold white] [cyan]{months}ヶ月[/cyan]  "
+        f"{'[green]NISA済[/green]' if nisa else '[red]NISA未[/red]'}  "
+        f"{'[green]iDeCo済[/green]' if ideco else '[red]iDeCo未[/red]'}",
+        title="[bold blue]億万長者 実行カレンダー生成[/bold blue]",
+        border_style="blue",
+    ))
+
+    top_stocks = []
+    optimal_tickers = []
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as prog:
+        if with_screen:
+            prog.add_task("[cyan]銘柄スクリーニング実行中...", total=None)
+            try:
+                top_stocks = StockScreener(top_n=5).run()
+            except Exception:
+                pass
+
+        prog.add_task("[cyan]最適ポートフォリオ計算中...", total=None)
+        opt = EfficientFrontierOptimizer(period="2y")
+        if opt.fetch_and_prepare():
+            pf = opt.maximize_sharpe()
+            optimal_tickers = [t for t, w in zip(pf.tickers, pf.weights) if w >= 0.08]
+
+    planner = ExecutionPlanner(
+        initial_capital=capital,
+        monthly_budget=monthly,
+        age=age,
+        is_self_employed=self_employed,
+        has_nisa=nisa,
+        has_ideco=ideco,
+        optimal_tickers=optimal_tickers,
+        top_stocks=top_stocks,
+    )
+    plan = planner.generate(months=months)
+
+    # Summary
+    console.print()
+    console.print(Panel(plan.summary, title="[bold]月次投資配分サマリー[/bold]", border_style="cyan"))
+
+    # Month-by-month calendar
+    priority_color = {"HIGH": "bright_red", "MEDIUM": "yellow", "LOW": "dim"}
+    category_icon = {"SETUP": "⚙", "INVEST": "💰", "TAX": "🧾", "REVIEW": "📊"}
+    category_color = {"SETUP": "cyan", "INVEST": "green", "TAX": "magenta", "REVIEW": "blue"}
+
+    console.print()
+    console.print(Rule("[bold yellow]実行カレンダー[/bold yellow]"))
+
+    by_month = plan.by_month(months)
+    for m in range(months):
+        tasks = by_month.get(m, [])
+        if not tasks:
+            continue
+
+        month_label = tasks[0].date_label
+        total_invest = sum(t.amount_jpy for t in tasks if t.category == "INVEST")
+
+        task_lines = []
+        for t in sorted(tasks, key=lambda x: (0 if x.priority == "HIGH" else 1 if x.priority == "MEDIUM" else 2)):
+            pc = priority_color.get(t.priority, "white")
+            cc = category_color.get(t.category, "white")
+            icon = category_icon.get(t.category, "•")
+            amount_str = f" [cyan]{t.amount_jpy:,.0f}円[/cyan]" if t.amount_jpy > 0 else ""
+            note_str = f"\n       [dim]{t.note}[/dim]" if t.note else ""
+            task_lines.append(
+                f"  [{pc}][{t.priority}][/{pc}] [{cc}]{icon} {t.action}[/{cc}]{amount_str}{note_str}"
+            )
+
+        invest_str = f"  投資合計: [bold cyan]{total_invest:,.0f}円[/bold cyan]" if total_invest > 0 else ""
+        console.print(Panel(
+            "\n".join(task_lines) + ("\n\n" + invest_str if invest_str else ""),
+            title=f"[bold]{month_label}[/bold]",
+            border_style="blue" if m > 0 else "bright_blue",
+        ))
+
+    # 1-year summary stats
+    total_invested = monthly * months
+    sim = CompoundGrowthSimulator(capital, 0.07, monthly)
+    result = sim.simulate(years=months // 12 + 1, target=100_000_000)
+    console.print()
+    console.print(Panel(
+        f"  [bold]この{months}ヶ月の総投資予定額:[/bold] [cyan]{total_invested:,.0f}円[/cyan]\n"
+        f"  [bold]年率7%想定での{months}ヶ月後資産:[/bold] [cyan]{result.year_by_year[min(months//12+1, len(result.year_by_year)-1)][1]:,.0f}円[/cyan]\n"
+        f"  [bold]1億円達成予測:[/bold] "
+        + (f"[bright_green]約{result.years_to_target}年後[/bright_green]" if result.years_to_target else "[yellow]60年超（月積立増加を検討）[/yellow]"),
+        title="[bold]実行計画サマリー[/bold]",
         border_style="bright_yellow",
     ))
 
